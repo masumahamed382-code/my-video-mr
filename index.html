@@ -94,6 +94,29 @@ h2{margin-top:12px}
 .data-on{border:1px solid #35c46a!important}
 .home-message{text-align:center;font-size:28px;font-weight:700;padding:28px 14px}
 
+
+/* M❤️R Chat + Audio Call */
+.mr-panel{padding:12px;border-radius:12px;background:#18181c;margin:12px 0}
+body.light .mr-panel{background:#fff;box-shadow:0 1px 5px #ddd}
+.mr-panel input,.mr-panel textarea{width:100%;padding:11px;border-radius:10px;border:1px solid #444;background:#1a1a1e;color:#fff;margin:5px 0}
+body.light .mr-panel input,body.light .mr-panel textarea{background:#fff;color:#111;border-color:#ccc}
+.mr-panel textarea{min-height:130px;font-family:monospace;font-size:12px}
+.mr-user-result{display:flex;align-items:center;gap:8px;padding:10px 0;border-bottom:1px solid #333}
+.mr-user-result b{flex:1}
+.mr-messages{height:330px;overflow:auto;padding:10px;margin-top:10px;background:#101014;border-radius:10px}
+body.light .mr-messages{background:#f1f1f1}
+.mr-msg{display:flex;margin:6px 0}
+.mr-msg span{max-width:78%;padding:9px 11px;border-radius:12px;background:#2a2a31;word-break:break-word}
+.mr-msg.mine{justify-content:flex-end}
+.mr-msg.mine span{background:#3b3b45}
+.mr-send{display:flex;gap:7px;margin-top:8px}
+.mr-send input{flex:1;margin:0}
+.mr-send button{margin:0}
+.mr-call-overlay{position:fixed;inset:0;z-index:300;background:rgba(0,0,0,.78);display:flex;align-items:center;justify-content:center;padding:20px}
+.mr-call-card{width:min(360px,92vw);padding:25px;border-radius:18px;background:#18181c;text-align:center;box-shadow:0 10px 40px rgba(0,0,0,.5)}
+.mr-call-card .actions{justify-content:center}
+.mr-call-card button{margin-top:12px}
+
 </style>
 </head>
 
@@ -156,7 +179,7 @@ h2{margin-top:12px}
 <script>
 /* এখানে নিজের YouTube Data API v3 key বসাও।
    API key কাউকে chat-এ পাঠাবে না। */
-const API_KEY = "AIzaSyDMrKuihyHeKekYgTv7fdSdGt2LgTgxO_E";
+const API_KEY = "PASTE_YOUR_API_KEY_HERE";
 
 let nextPageToken = "";
 let currentQuery = "";
@@ -373,5 +396,392 @@ renderHistory();
 renderSaved();
 updateDataButton();
 </script>
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-app.js";
+import {
+  getAuth, onAuthStateChanged, createUserWithEmailAndPassword,
+  signInWithEmailAndPassword, signOut
+} from "https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js";
+import {
+  getFirestore, doc, setDoc, getDoc, getDocs, collection, addDoc,
+  query, where, orderBy, onSnapshot, serverTimestamp, limit, updateDoc
+} from "https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js";
+
+const firebaseConfig={
+  apiKey:"AIzaSyD2xn8c5-6pacLTVP6OzyfAzaWwe7nRFk0",
+  authDomain:"mr-video-cdf0e.firebaseapp.com",
+  projectId:"mr-video-cdf0e",
+  storageBucket:"mr-video-cdf0e.firebasestorage.app",
+  messagingSenderId:"32665364840",
+  appId:"1:32665364840:web:7590355d22ca519c79cedd",
+  measurementId:"G-5FQW9K4HF8"
+};
+let fbApp=null, auth=null, db=null, currentUser=null;
+let currentProfile=null, currentChat=null, unsubMessages=null, unsubCalls=null;
+let pc=null, activeCallId=null, callRole=null, callTimer=null, callStartedAt=null;
+const rtcConfig={
+  iceServers:[
+    {urls:"stun:stun.l.google.com:19302"},
+    {urls:"stun:stun1.l.google.com:19302"}
+  ]
+};
+
+const $m=id=>document.getElementById(id);
+const esc=s=>String(s??"").replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[m]));
+function initFirebase(){
+  try{
+    fbApp=initializeApp(firebaseConfig);
+    auth=getAuth(fbApp);
+    db=getFirestore(fbApp);
+    onAuthStateChanged(auth, async u=>{
+      currentUser=u||null;
+      if(u){
+        const snap=await getDoc(doc(db,"users",u.uid));
+        currentProfile=snap.exists()?snap.data():null;
+        $m("mrAuthStatus").textContent=currentProfile?.username
+          ? "লগইন: @"+currentProfile.username : "লগইন হয়েছে";
+        $m("mrAuthForms").style.display="none";
+        $m("mrUserBox").style.display="block";
+        listenIncomingCalls();
+      }else{
+        currentProfile=null;
+        $m("mrAuthForms").style.display="block";
+        $m("mrUserBox").style.display="none";
+        if(unsubCalls){unsubCalls();unsubCalls=null}
+      }
+    });
+    return true;
+  }catch(e){
+    alert("Firebase initialize failed: "+(e.message||e));
+    return false;
+  }
+}
+
+window.mrRegister=async()=>{
+  if(!auth){alert("Firebase এখনো চালু হয়নি");return}
+  const username=$m("mrUsername").value.trim().toLowerCase();
+  const email=$m("mrEmail").value.trim();
+  const pass=$m("mrPass").value;
+  if(!/^[a-z0-9_]{3,20}$/.test(username)){
+    alert("Username 3-20 অক্ষর; শুধু a-z, 0-9, _ ব্যবহার করো।");return;
+  }
+  if(!email||pass.length<6){alert("Email ও কমপক্ষে 6 অক্ষরের password দাও।");return}
+  try{
+    const qs=await getDocs(query(
+      collection(db,"users"),where("username","==",username),limit(1)
+    ));
+    if(!qs.empty){alert("এই username আগে থেকেই আছে।");return}
+    const cr=await createUserWithEmailAndPassword(auth,email,pass);
+    await setDoc(doc(db,"users",cr.user.uid),{
+      username,email,createdAt:serverTimestamp()
+    });
+    alert("Account তৈরি হয়েছে।");
+  }catch(e){alert(e.message||"Register failed")}
+};
+
+window.mrLogin=async()=>{
+  try{
+    await signInWithEmailAndPassword(
+      auth,$m("mrEmail").value.trim(),$m("mrPass").value
+    );
+  }catch(e){alert(e.message||"Login failed")}
+};
+window.mrLogout=()=>signOut(auth);
+
+window.mrSearchUser=async()=>{
+  if(!currentUser){alert("আগে Login করো");return}
+  const name=$m("mrFind").value.trim().toLowerCase();
+  if(!name)return;
+  try{
+    const snap=await getDocs(query(
+      collection(db,"users"),where("username","==",name),limit(1)
+    ));
+    const el=$m("mrUserResults");
+    if(snap.empty){
+      el.innerHTML='<div class="empty">User পাওয়া যায়নি।</div>';return;
+    }
+    const u=snap.docs[0], d=u.data();
+    if(u.id===currentUser.uid){
+      el.innerHTML='<div class="empty">এটা তোমার নিজের username।</div>';return;
+    }
+    el.innerHTML=
+      `<div class="mr-user-result"><b>@${esc(d.username)}</b>`+
+      `<button onclick="mrOpenChat('${u.id}','${esc(d.username)}')">💬 Chat</button>`+
+      `<button onclick="mrStartCall('${u.id}','${esc(d.username)}')">📞 Call</button></div>`;
+  }catch(e){alert(e.message||"Search failed")}
+};
+
+window.mrOpenChat=async(uid,name)=>{
+  if(!currentUser)return;
+  const chatId=[currentUser.uid,uid].sort().join("_");
+  currentChat={id:chatId,uid,name};
+  await setDoc(doc(db,"chats",chatId),{
+    participants:[currentUser.uid,uid],updatedAt:serverTimestamp()
+  },{merge:true});
+  $m("mrChatTitle").textContent="@"+name;
+  if(unsubMessages)unsubMessages();
+  const mq=query(
+    collection(db,"chats",chatId,"messages"),
+    orderBy("createdAt","asc"),limit(200)
+  );
+  unsubMessages=onSnapshot(mq,s=>{
+    const list=$m("mrMessages");
+    list.innerHTML="";
+    s.forEach(x=>{
+      const d=x.data(), mine=d.sender===currentUser.uid;
+      const div=document.createElement("div");
+      div.className="mr-msg "+(mine?"mine":"");
+      div.innerHTML=`<span>${esc(d.text)}</span>`;
+      list.appendChild(div);
+    });
+    list.scrollTop=list.scrollHeight;
+  },()=>{
+    $m("mrMessages").innerHTML=
+      '<div class="empty">Messages load হয়নি। Firestore Rules পরীক্ষা করো।</div>';
+  });
+};
+
+window.mrSend=async()=>{
+  const input=$m("mrMessage"), text=input.value.trim();
+  if(!text||!currentChat||!currentUser)return;
+  await addDoc(collection(db,"chats",currentChat.id,"messages"),{
+    sender:currentUser.uid,text,createdAt:serverTimestamp()
+  });
+  await updateDoc(doc(db,"chats",currentChat.id),{
+    lastMessage:text,updatedAt:serverTimestamp()
+  });
+  input.value="";
+};
+
+async function createPeer(){
+  pc=new RTCPeerConnection(rtcConfig);
+  pc.onicecandidate=async e=>{
+    if(e.candidate&&activeCallId){
+      const sub=callRole==="caller"?"callerCandidates":"calleeCandidates";
+      await addDoc(collection(db,"calls",activeCallId,sub),e.candidate.toJSON());
+    }
+  };
+  pc.ontrack=e=>{
+    const a=$m("mrRemoteAudio");
+    a.srcObject=e.streams[0];
+    a.play().catch(()=>{});
+  };
+  pc.onconnectionstatechange=()=>{
+    if(["failed","disconnected","closed"].includes(pc.connectionState))
+      endCall(false);
+  };
+  const stream=await navigator.mediaDevices.getUserMedia({
+    audio:true,video:false
+  });
+  stream.getTracks().forEach(t=>pc.addTrack(t,stream));
+  return stream;
+}
+
+function listenCandidates(callId,sub){
+  return onSnapshot(collection(db,"calls",callId,sub),s=>{
+    s.docChanges().forEach(async ch=>{
+      if(ch.type==="added"){
+        try{
+          if(pc)await pc.addIceCandidate(
+            new RTCIceCandidate(ch.doc.data())
+          );
+        }catch(e){}
+      }
+    });
+  });
+}
+
+window.mrStartCall=async(uid,name)=>{
+  if(!currentUser){alert("আগে Login করো");return}
+  if(!navigator.mediaDevices?.getUserMedia){
+    alert("এই browser-এ microphone call support নেই।");return;
+  }
+  try{
+    if(pc)await endCall(false);
+    callRole="caller";
+    const ref=doc(collection(db,"calls"));
+    activeCallId=ref.id;
+    await createPeer();
+    const offer=await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    await setDoc(ref,{
+      caller:currentUser.uid,
+      callerName:currentProfile?.username||"",
+      callee:uid,calleeName:name,status:"ringing",
+      offer:{type:offer.type,sdp:offer.sdp},
+      createdAt:serverTimestamp()
+    });
+    listenCandidates(activeCallId,"calleeCandidates");
+    $m("mrCallBox").style.display="flex";
+    $m("mrCallName").textContent="Calling @"+name+"…";
+    startTimer();
+
+    onSnapshot(ref,async s=>{
+      const d=s.data();
+      if(!d)return;
+      if(d.status==="accepted"&&d.answer&&pc&&
+         pc.signalingState!=="stable"){
+        await pc.setRemoteDescription(
+          new RTCSessionDescription(d.answer)
+        );
+        $m("mrCallName").textContent="Connected with @"+name;
+      }
+      if(d.status==="ended")endCall(false);
+    });
+  }catch(e){
+    alert("Call শুরু করা যায়নি: "+e.message);
+    endCall(false);
+  }
+};
+
+window.mrAcceptCall=async(callId)=>{
+  const ref=doc(db,"calls",callId);
+  const snap=await getDoc(ref);
+  if(!snap.exists())return;
+  const d=snap.data();
+  if(d.callee!==currentUser.uid)return;
+  try{
+    callRole="callee";
+    activeCallId=callId;
+    await createPeer();
+    await pc.setRemoteDescription(new RTCSessionDescription(d.offer));
+    const answer=await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    await updateDoc(ref,{
+      status:"accepted",
+      answer:{type:answer.type,sdp:answer.sdp}
+    });
+    listenCandidates(callId,"callerCandidates");
+    $m("mrCallBox").style.display="flex";
+    $m("mrCallName").textContent="Connected with @"+d.callerName;
+    startTimer();
+  }catch(e){alert("Call accept হয়নি: "+e.message)}
+};
+
+function listenIncomingCalls(){
+  if(unsubCalls)unsubCalls();
+  const q=query(
+    collection(db,"calls"),
+    where("callee","==",currentUser.uid),
+    limit(10)
+  );
+  unsubCalls=onSnapshot(q,s=>{
+    s.docChanges().forEach(ch=>{
+      if(ch.type==="added"){
+        const d=ch.doc.data();
+        if(d.status!=="ringing")return;
+        $m("mrIncoming").style.display="flex";
+        $m("mrIncomingName").textContent="@"+(d.callerName||"Someone");
+        $m("mrIncomingAccept").onclick=()=>{
+          $m("mrIncoming").style.display="none";
+          mrAcceptCall(ch.doc.id);
+        };
+        $m("mrIncomingDecline").onclick=async()=>{
+          await updateDoc(doc(db,"calls",ch.doc.id),{status:"ended"});
+          $m("mrIncoming").style.display="none";
+        };
+      }
+    });
+  });
+}
+
+window.endCall=async(send=true)=>{
+  try{
+    if(send&&activeCallId)
+      await updateDoc(doc(db,"calls",activeCallId),{status:"ended"});
+  }catch(e){}
+  if(pc){
+    pc.getSenders().forEach(s=>s.track?.stop());
+    pc.close();pc=null;
+  }
+  if(callTimer)clearInterval(callTimer);
+  callTimer=null;activeCallId=null;callRole=null;
+  $m("mrCallBox").style.display="none";
+  $m("mrCallTime").textContent="00:00";
+};
+
+function startTimer(){
+  callStartedAt=Date.now();
+  if(callTimer)clearInterval(callTimer);
+  callTimer=setInterval(()=>{
+    const s=Math.floor((Date.now()-callStartedAt)/1000);
+    $m("mrCallTime").textContent=
+      String(Math.floor(s/60)).padStart(2,"0")+":"+String(s%60).padStart(2,"0");
+  },1000);
+}
+
+function injectUI(){
+  const nav=document.querySelector(".nav");
+  if(nav&&!document.getElementById("nav-chat")){
+    const b=document.createElement("button");
+    b.id="nav-chat";b.innerHTML="💬<br>Chat";
+    b.onclick=()=>showPage("chat");
+    nav.appendChild(b);
+  }
+  const main=document.querySelector("main");
+  if(main&&!document.getElementById("chat")){
+    const s=document.createElement("section");
+    s.id="chat";s.className="page";
+    s.innerHTML=`
+      <h2>💬 Chat + 📞 Audio Call</h2>
+
+      <div class="mr-panel" id="mrAuthForms">
+        <input id="mrUsername" placeholder="নতুন Username (register-এর জন্য)">
+        <input id="mrEmail" type="email" placeholder="Email">
+        <input id="mrPass" type="password" placeholder="Password (কমপক্ষে 6)">
+        <div class="actions">
+          <button onclick="mrRegister()">Create Account</button>
+          <button onclick="mrLogin()">Login</button>
+        </div>
+      </div>
+
+      <div class="mr-panel" id="mrUserBox" style="display:none">
+        <div id="mrAuthStatus"></div>
+        <div class="actions">
+          <button onclick="mrLogout()">Logout</button>
+        </div>
+        <input id="mrFind" placeholder="Username লিখে Search করো">
+        <button onclick="mrSearchUser()">🔎 Search User</button>
+        <div id="mrUserResults"></div>
+      </div>
+
+      <div class="mr-panel">
+        <div><b>Chat with:</b> <span id="mrChatTitle">কাউকে Search করে Chat শুরু করো</span></div>
+        <div id="mrMessages" class="mr-messages"></div>
+        <div class="mr-send">
+          <input id="mrMessage" placeholder="Message লিখো" onkeydown="if(event.key==='Enter')mrSend()">
+          <button onclick="mrSend()">Send</button>
+        </div>
+      </div>
+
+      <div id="mrIncoming" class="mr-call-overlay" style="display:none">
+        <div class="mr-call-card">
+          <b>📞 Incoming audio call</b>
+          <div id="mrIncomingName"></div>
+          <div class="actions">
+            <button id="mrIncomingAccept">Accept</button>
+            <button id="mrIncomingDecline">Decline</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="mrCallBox" class="mr-call-overlay" style="display:none">
+        <div class="mr-call-card">
+          <b id="mrCallName">Audio Call</b>
+          <div id="mrCallTime">00:00</div>
+          <button id="mrCallEnd" onclick="endCall(true)">🔴 End Call</button>
+        </div>
+      </div>
+      <audio id="mrRemoteAudio" autoplay playsinline></audio>
+    `;
+    main.appendChild(s);
+  }
+}
+
+injectUI();
+initFirebase();
+</script>
+
 </body>
 </html>
